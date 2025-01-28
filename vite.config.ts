@@ -1,34 +1,26 @@
-import {defineConfig} from "vite";
-import path from "path";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-declare const global: Window;
-
-// https://vitejs.dev/config/
-export default defineConfig({
-	define: {
-		global: typeof global === "undefined" && Window,
-	},
-	plugins: [react()],
-	resolve: {
-		alias: {
-			"@": path.resolve(__dirname, "./src"),
-		},
-	},
-});
-
-/* import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { nodePolyfills } from "vite-plugin-node-polyfills";
+import path from "path";
 
 export default defineConfig({
-  plugins: [react()],
-  build: {
-    outDir: 'build',  // Change output directory from 'dist' to 'build'
-    commonjsOptions: {
-      include: [/node_modules/],
+  plugins: [
+    react(),
+    nodePolyfills(),
+  ],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
     },
-    rollupOptions: {
-      external: [],
+  },
+  server: {
+    proxy: {
+      "/api": {
+        target: "https://largeinfra.com", // Your backend server
+        changeOrigin: true, // Change the origin of the request to the target URL
+        rewrite: (path) => path.replace(/^\/api/, ""), // Remove the `/api` prefix
+        secure: false, // Bypass SSL/TLS certificate validation (for testing only)
+      },
     },
   },
 });
-*/

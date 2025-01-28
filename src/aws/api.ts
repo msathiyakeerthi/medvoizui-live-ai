@@ -25,3 +25,4 @@ export async function transcriptionApi(data: any) {
 		throw new Error("An unknown error occurred.");
 	}
 }
+

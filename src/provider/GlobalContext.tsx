@@ -84,123 +84,134 @@ export const GlobalProvider = ({children}: {children: ReactNode}) => {
 	// Combine `lines` and `currentLine` into a single array of strings
 	const combinedTranscriptions = [...lines.map(line => line.text), ...currentLine.map(line => line.text)];
 
-	const startStreaming = async (
-		handleTranscribeOutput: (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => void,
-		currentCredentials: ICredentials,
-		audioSource: string
-	) => {
-		const audioContext = new window.AudioContext();
-		let stream: MediaStream;
+const startStreaming = async (
+    handleTranscribeOutput: (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => void,
+    currentCredentials: ICredentials,
+    audioSource: string
+) => {
+    const audioContext = new window.AudioContext();
+    let screenStream: MediaStream | null = null;
+    let micStream: MediaStream | null = null;
+    let combinedStream: MediaStream;
 
-		if (audioSource === "ScreenCapture") {
-			try {
-				stream = await window.navigator.mediaDevices.getDisplayMedia({
-					video: true,
-					audio: true, // Ensure the screen capture also grabs audio
-				});
+    try {
+        // Capture screen audio and video
+        if (audioSource === "ScreenCapture") {
+            screenStream = await window.navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true, // Ensure screen capture includes audio
+            });
+            setScreenShareStream(screenStream);
+        }
 
-				setScreenShareStream(stream);
-			} catch (err) {
-				console.error("Error starting screen capture:", err);
-				return;
-			}
-		} else {
-			try {
-				stream = await window.navigator.mediaDevices.getUserMedia({
-					video: false,
-					audio: true, // Microphone input for audio capture
-				});
-				setAudioStream(stream);
-			} catch (err) {
-				console.error("Error accessing microphone:", err);
-				return;
-			}
-		}
+        // Capture microphone audio
+        micStream = await window.navigator.mediaDevices.getUserMedia({
+            video: true,
+			audio: true, // Microphone input
+        });
+        setAudioStream(micStream);
 
-		const source1 = audioContext.createMediaStreamSource(stream);
+        // Merge audio tracks from both streams
+        const combinedAudioTracks = [
+            ...(screenStream ? screenStream.getAudioTracks() : []),
+            ...(micStream ? micStream.getAudioTracks() : []),
+        ];
 
-		const recordingprops: RecordingProperties = {
-			numberOfChannels: 1,
-			sampleRate: audioContext.sampleRate,
-			maxFrameCount: (audioContext.sampleRate * 1) / 10,
-		};
+        // Create a new MediaStream with combined audio tracks
+        combinedStream = new MediaStream(combinedAudioTracks);
 
-		try {
-			await audioContext.audioWorklet.addModule("./worklets/recording-processor.js");
-		} catch (error) {
-			console.log(`Error loading audio worklet module: ${error}`);
-			return;
-		}
+        // Log the combined stream for debugging
+        console.log("Combined Stream Tracks:", combinedStream.getTracks());
+    } catch (err) {
+        console.error("Error capturing media:", err);
+        return;
+    }
 
-		const mediaRecorder = new AudioWorkletNode(audioContext, "recording-processor", {
-			processorOptions: recordingprops,
-		});
+    // Create an audio source from the combined stream
+    const source1 = audioContext.createMediaStreamSource(combinedStream);
 
-		const destination = audioContext.createMediaStreamDestination();
+    const recordingprops: RecordingProperties = {
+        numberOfChannels: 1,
+        sampleRate: audioContext.sampleRate,
+        maxFrameCount: (audioContext.sampleRate * 1) / 10,
+    };
 
-		mediaRecorder.port.postMessage({
-			message: "UPDATE_RECORDING_STATE",
-			setRecording: true,
-		});
+    try {
+        await audioContext.audioWorklet.addModule("./worklets/recording-processor.js");
+    } catch (error) {
+        console.log(`Error loading audio worklet module: ${error}`);
+        return;
+    }
 
-		source1.connect(mediaRecorder).connect(destination);
+    const mediaRecorder = new AudioWorkletNode(audioContext, "recording-processor", {
+        processorOptions: recordingprops,
+    });
 
-		mediaRecorder.port.onmessageerror = error => {
-			console.log(`Error receiving message from worklet: ${error}`);
-		};
+    const destination = audioContext.createMediaStreamDestination();
 
-		const audioDataIterator = pEvent.iterator<"message", MessageEvent<MessageDataType>>(mediaRecorder.port, "message");
+    mediaRecorder.port.postMessage({
+        message: "UPDATE_RECORDING_STATE",
+        setRecording: true,
+    });
 
-		const getAudioStream = async function* () {
-			for await (const chunk of audioDataIterator) {
-				if (chunk.data.message === "SHARE_RECORDING_BUFFER") {
-					const abuffer = pcmEncode(chunk.data.buffer[0]);
-					const audiodata = new Uint8Array(abuffer);
-					yield {
-						AudioEvent: {
-							AudioChunk: audiodata,
-						},
-					};
-				}
-			}
-		};
+    source1.connect(mediaRecorder).connect(destination);
 
-		const transcribeClient = new TranscribeStreamingClient({
-			region: region,
-			credentials: currentCredentials,
-		});
+    mediaRecorder.port.onmessageerror = error => {
+        console.log(`Error receiving message from worklet: ${error}`);
+    };
 
-		const command = new StartStreamTranscriptionCommand({
-			LanguageCode: language,
-			MediaEncoding: "pcm",
-			MediaSampleRateHertz: sampleRate,
-			AudioStream: getAudioStream(),
-		});
+    const audioDataIterator = pEvent.iterator<"message", MessageEvent<MessageDataType>>(mediaRecorder.port, "message");
 
-		try {
-			const data = await transcribeClient.send(command);
-			console.log("Transcribe session established:", data.SessionId);
+    const getAudioStream = async function* () {
+        for await (const chunk of audioDataIterator) {
+            if (chunk.data.message === "SHARE_RECORDING_BUFFER") {
+                const abuffer = pcmEncode(chunk.data.buffer[0]);
+                const audiodata = new Uint8Array(abuffer);
+                yield {
+                    AudioEvent: {
+                        AudioChunk: audiodata,
+                    },
+                };
+            }
+        }
+    };
 
-			if (data.TranscriptResultStream) {
-				for await (const event of data.TranscriptResultStream) {
-					if (event?.TranscriptEvent?.Transcript) {
-						for (const result of event?.TranscriptEvent?.Transcript.Results || []) {
-							if (result?.Alternatives && result?.Alternatives[0].Items) {
-								const completeSentence = result.Alternatives[0].Items.map(item => item.Content).join(" ");
-								handleTranscribeOutput(completeSentence.trim(), !result.IsPartial, transcribeClient, mediaRecorder);
-							}
-						}
-					}
-				}
-			}
-		} catch (error: unknown) {
-			if (error instanceof Error) {
-				console.error("Error during streaming:", error.message);
-			} else {
-				console.error("Unknown error during streaming");
-			}
-		}
-	};
+    const transcribeClient = new TranscribeStreamingClient({
+        region: region,
+        credentials: currentCredentials,
+    });
+
+    const command = new StartStreamTranscriptionCommand({
+        LanguageCode: language,
+        MediaEncoding: "pcm",
+        MediaSampleRateHertz: sampleRate,
+        AudioStream: getAudioStream(),
+    });
+
+    try {
+        const data = await transcribeClient.send(command);
+        console.log("Transcribe session established:", data.SessionId);
+
+        if (data.TranscriptResultStream) {
+            for await (const event of data.TranscriptResultStream) {
+                if (event?.TranscriptEvent?.Transcript) {
+                    for (const result of event?.TranscriptEvent?.Transcript.Results || []) {
+                        if (result?.Alternatives && result?.Alternatives[0].Items) {
+                            const completeSentence = result.Alternatives[0].Items.map(item => item.Content).join(" ");
+                            handleTranscribeOutput(completeSentence.trim(), !result.IsPartial, transcribeClient, mediaRecorder);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error: unknown) {
+        if (error instanceof Error) {
+            console.error("Error during streaming:", error.message);
+        } else {
+            console.error("Unknown error during streaming");
+        }
+    }
+};
 
 	// Stop streaming function
 	const stopStreaming = async (mediaRecorder: AudioWorkletNode, transcribeClient: TranscribeStreamingClient | {destroy: () => void}) => {
