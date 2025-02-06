@@ -38,7 +38,7 @@ const MediaCopilot: FC<IMediaCopilotProps> = ({ apiResponses }) => {
     const medicalReport = apiResponses.join(" ");
 
     try {
-      const response = await fetch("/api/react-api/save_response.php", {
+      const response = await fetch("/api/react-api/save_response_patients.php", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
