@@ -7,7 +7,7 @@ interface TranscriptionCardProps {
   status?: 'pending' | 'completed' | 'error';
 }
 
-const TranscriptionCard: FC<TranscriptionCardProps> = ({ text, timestamp, status = 'completed' }) => (
+const TranscriptionCard: FC<TranscriptionCardProps> = ({ text, timestamp = 'completed' }) => (
   <div className='flex items-center w-full'>
     <div className='bg-white p-4 rounded-xl shadow-sm border border-gray-100 w-full'>
       <div className='flex flex-col gap-2'>

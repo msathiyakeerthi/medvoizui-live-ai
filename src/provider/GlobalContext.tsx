@@ -75,13 +75,27 @@ export const GlobalProvider = ({children}: {children: ReactNode}) => {
 	const handleTranscribe = async () => {
 		if (transcribeStatus) {
 			console.log("Stopping transcription");
+	
+			// Ensure transcriptions is an array before joining
+			const accumulatedTranscriptions = Array.isArray(finalTranscriptions)
+				? finalTranscriptions.join(" ").trim()
+				: String(finalTranscriptions).trim(); // Convert to string if not an array
+	
+			if (accumulatedTranscriptions.length > 0) {
+				await saveToDatabase(finalTranscriptions); // Always pass an array
+			} else {
+				console.warn("No transcriptions to save.");
+			}
 		} else {
-			console.log("Starting transcription");
+			console.log("Starting transcription...");
+			setFinalTranscriptions([]); // Reset transcription when starting new session
 		}
-		setTranscribeStatus(!transcribeStatus);
+	
+		setTranscribeStatus((prev) => !prev);
 	};
-
-	// Combine `lines` and `currentLine` into a single array of strings
+	
+	
+// Combine `lines` and `currentLine` into a single array of strings
 	const combinedTranscriptions = [...lines.map(line => line.text), ...currentLine.map(line => line.text)];
 
 const startStreaming = async (
@@ -272,6 +286,7 @@ const startStreaming = async (
 
 				// Check if we're in auto mode and if word count exceeds the limit
 				if (sendMode === "auto" && wordCount >= wordLimit) {
+	//				saveToDatabase(updatedTranscriptions);
 					sendToApi(updatedTranscriptions); // Auto-send only if in auto mode
 				}
 
@@ -317,7 +332,49 @@ const startStreaming = async (
 			setIsApiCallInProgress(false);
 		}
 	};
-
+	const saveToDatabase = async (transcriptions: string | string[]) => {
+		// Ensure transcriptions is always treated as an array
+		const accumulatedTranscriptions = Array.isArray(transcriptions)
+			? transcriptions.join(" ").trim()
+			: String(transcriptions).trim(); // Convert to string if not an array
+	
+		if (accumulatedTranscriptions.length === 0) {
+			console.warn("No transcription data to save.");
+			return;
+		}
+	
+		try {
+			console.log("Saving transcription data:", accumulatedTranscriptions);
+	
+			const response = await fetch("https://largeinfra.com/api/react-api/save_response_patients-1.php", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					username: "Brindha4", // Replace with dynamic username if needed
+					transcription: accumulatedTranscriptions, // Send accumulated transcriptions
+					medicalReport: "Generated Report Data",
+				}),
+			});
+	
+			if (!response.ok) {
+				throw new Error(`HTTP Error: ${response.status}`);
+			}
+	
+			const data = await response.json();
+			console.log("Database Save Response:", data);
+	
+			if (data.status !== "success") {
+				throw new Error(`API Error: ${data.message}`);
+			}
+	
+		} catch (error: unknown) {
+			console.error("Error saving to database:", error);
+		}
+	};
+	
+	
 	const startRecording = async () => {
 		if (!currentCredentials) return;
 
