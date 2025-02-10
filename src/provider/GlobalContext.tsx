@@ -98,7 +98,7 @@ export const GlobalProvider = ({children}: {children: ReactNode}) => {
 // Combine `lines` and `currentLine` into a single array of strings
 	const combinedTranscriptions = [...lines.map(line => line.text), ...currentLine.map(line => line.text)];
 
-const startStreaming = async (
+/* const startStreaming = async (
     handleTranscribeOutput: (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => void,
     currentCredentials: ICredentials,
     audioSource: string
@@ -120,7 +120,7 @@ const startStreaming = async (
 
         // Capture microphone audio
         micStream = await window.navigator.mediaDevices.getUserMedia({
-            video: true,
+            video: false,
 			audio: true, // Microphone input
         });
         setAudioStream(micStream);
@@ -145,7 +145,7 @@ const startStreaming = async (
     const source1 = audioContext.createMediaStreamSource(combinedStream);
 
     const recordingprops: RecordingProperties = {
-        numberOfChannels: 1,
+        numberOfChannels: 2,
         sampleRate: audioContext.sampleRate,
         maxFrameCount: (audioContext.sampleRate * 1) / 10,
     };
@@ -225,9 +225,141 @@ const startStreaming = async (
             console.error("Unknown error during streaming");
         }
     }
+}; */
+const startStreaming = async (
+    handleTranscribeOutput: (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => void,
+    currentCredentials: ICredentials,
+    audioSource: string
+) => {
+    const audioContext = new window.AudioContext();
+    let screenStream: MediaStream | null = null;
+    let micStream: MediaStream | null = null;
+       // Capture microphone audio
+	   micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+        // Capture system audio if ScreenCapture is selected
+        if (audioSource === "ScreenCapture") {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true, // No need for video
+                audio: true,
+            });
+        }
+
+ 
+
+        if (!micStream && !screenStream) {
+            throw new Error("No valid audio sources available.");
+        }
+
+        // Merge audio tracks from both sources
+        const combinedAudioTracks = [
+            ...(screenStream ? screenStream.getAudioTracks() : []),
+            ...(micStream ? micStream.getAudioTracks() : []),
+        ];
+
+        // Ensure at least one track exists
+        if (combinedAudioTracks.length === 0) {
+            throw new Error("No audio tracks available.");
+        }
+
+        // Create a single MediaStream with merged tracks
+        const combinedStream = new MediaStream(combinedAudioTracks);
+
+        console.log("Combined Stream Tracks:", combinedStream.getTracks());
+
+        // Create an AudioContext source from the merged stream
+        const audioSourceNode = audioContext.createMediaStreamSource(combinedStream);
+
+        const recordingProps = {
+            numberOfChannels: 2, // Stereo
+            sampleRate: audioContext.sampleRate,
+            maxFrameCount: (audioContext.sampleRate * 1) / 10, // Short buffer
+        };
+
+        // Load the AudioWorklet processor
+        try {
+            await audioContext.audioWorklet.addModule("./worklets/recording-processor.js");
+        } catch (error) {
+            console.error(`Error loading audio worklet module: ${error}`);
+            return;
+        }
+
+        // Create the Worklet Node
+        const mediaRecorder = new AudioWorkletNode(audioContext, "recording-processor", {
+            processorOptions: recordingProps,
+        });
+
+        // Create a destination node
+        const destination = audioContext.createMediaStreamDestination();
+
+        mediaRecorder.port.postMessage({
+            message: "UPDATE_RECORDING_STATE",
+            setRecording: true,
+        });
+
+        // Correct the connection flow
+        audioSourceNode.connect(mediaRecorder);
+        mediaRecorder.connect(destination);
+
+        mediaRecorder.port.onmessageerror = (error) => {
+            console.error(`Error receiving message from worklet: ${error}`);
+        };
+
+        // Capture PCM Data from Worklet
+        const audioDataIterator = pEvent.iterator<"message", MessageEvent<MessageDataType>>(mediaRecorder.port, "message");
+
+        const getAudioStream = async function* () {
+            for await (const chunk of audioDataIterator) {
+                if (chunk.data.message === "SHARE_RECORDING_BUFFER") {
+                    const abuffer = pcmEncode(chunk.data.buffer[0]); // PCM Encoding
+                    const audiodata = new Uint8Array(abuffer);
+                    yield {
+                        AudioEvent: {
+                            AudioChunk: audiodata,
+                        },
+                    };
+                }
+            }
+        };
+
+        // Initialize AWS Transcribe Client
+        const transcribeClient = new TranscribeStreamingClient({
+            region: "us-east-1", // Change region if needed
+            credentials: currentCredentials,
+        });
+
+        const command = new StartStreamTranscriptionCommand({
+            LanguageCode: "en-US",
+            MediaEncoding: "pcm",
+            MediaSampleRateHertz: recordingProps.sampleRate,
+            AudioStream: getAudioStream(),
+        });
+
+        try {
+            const data = await transcribeClient.send(command);
+            console.log("Transcribe session established:", data.SessionId);
+
+            if (data.TranscriptResultStream) {
+                for await (const event of data.TranscriptResultStream) {
+                    if (event?.TranscriptEvent?.Transcript) {
+                        for (const result of event?.TranscriptEvent?.Transcript.Results || []) {
+                            if (result?.Alternatives && result?.Alternatives[0].Items) {
+                                const completeSentence = result.Alternatives[0].Items.map(item => item.Content).join(" ");
+                                handleTranscribeOutput(completeSentence.trim(), !result.IsPartial, transcribeClient, mediaRecorder);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error("Error during streaming:", error instanceof Error ? error.message : "Unknown error");
+        }
+    } catch (err) {
+        console.error("Error capturing media:", err);
+    }
 };
 
-	// Stop streaming function
+// Stop streaming function
 	const stopStreaming = async (mediaRecorder: AudioWorkletNode, transcribeClient: TranscribeStreamingClient | {destroy: () => void}) => {
 		try {
 			if (mediaRecorder) {
@@ -278,7 +410,7 @@ const startStreaming = async (
 		}
 	};
 
-	const onTranscriptionDataReceived = (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => {
+	/*const onTranscriptionDataReceived = (data: string, isFinal: boolean, transcriptionClient: TranscribeStreamingClient, mediaRecorder: AudioWorkletNode) => {
 		if (isFinal) {
 			setFinalTranscriptions((prev: string[]) => {
 				const updatedTranscriptions = [...prev, data];
@@ -302,13 +434,82 @@ const startStreaming = async (
 
 		setMediaRecorder(mediaRecorder);
 		setTranscriptionClient(transcriptionClient);
+	};*/
+	const onTranscriptionDataReceived = (
+		data: string,
+		isFinal: boolean,
+		transcriptionClient: TranscribeStreamingClient,
+		mediaRecorder: AudioWorkletNode
+	) => {
+		const timestamp = new Date().toISOString(); // Current timestamp
+	
+		console.log("📝 New Transcription Received:", data);
+		console.log("✅ Is Final:", isFinal);
+		console.log("⏳ Timestamp:", timestamp);
+	
+		if (isFinal) {
+			setFinalTranscriptions((prev) => {
+				const updatedTranscriptions = [...prev, { text: data, timestamp }];
+				console.log("📌 Updated Final Transcriptions:", updatedTranscriptions);
+	
+				const wordCount = updatedTranscriptions.map(t => t.text).join(" ").split(" ").length;
+				console.log("🧮 Word Count:", wordCount);
+	
+				if (sendMode === "auto" && wordCount >= wordLimit) {
+					console.log("🚀 Auto-sending to API...");
+					sendToApi(updatedTranscriptions);
+				}
+	
+				return updatedTranscriptions;
+			});
+		}
+	
+		setTranscript({
+			channel: "0",
+			partial: !isFinal,
+			text: data,
+			timestamp,
+		});
+	
+		setMediaRecorder(mediaRecorder);
+		setTranscriptionClient(transcriptionClient);
 	};
-
+	
 	const setApiResponse = (response: string) => {
 		setApiResponses(prev => [...prev, response]);
 	};
-
-	const sendToApi = async (transcriptionsToSend: string[]) => {
+	const sendToApi = async (transcriptionsToSend: { text: string; timestamp: string }[]) => {
+		const accumulatedTranscriptions = transcriptionsToSend.map(t => `[${t.timestamp}] ${t.text}`).join(" ");
+	
+		console.log("📤 Sending to API:", accumulatedTranscriptions);
+	
+		if (accumulatedTranscriptions.length === 0 || isApiCallInProgress) {
+			console.warn("⚠️ No transcription data to send.");
+			return;
+		}
+	
+		try {
+			setIsApiCallInProgress(true);
+			const response = await transcriptionApi({ question: accumulatedTranscriptions });
+	
+			console.log("📩 API Response:", response);
+	
+			if (response.text) {
+				setApiResponse(response.text);
+			} else {
+				setApiResponse("No response text found.");
+			}
+		} catch (error: unknown) {
+			if (error instanceof Error) {
+				console.error("❌ API Error:", error.message);
+				setApiResponse(`Error: ${error.message}`);
+			}
+		} finally {
+			setIsApiCallInProgress(false);
+		}
+	};
+	
+	/* const sendToApi = async (transcriptionsToSend: string[]) => {
 		const accumulatedTranscriptions = transcriptionsToSend.join(" ");
 
 		if (accumulatedTranscriptions.length === 0 || isApiCallInProgress) {
@@ -331,8 +532,8 @@ const startStreaming = async (
 		} finally {
 			setIsApiCallInProgress(false);
 		}
-	};
-	const saveToDatabase = async (transcriptions: string | string[]) => {
+	}; */
+	/*const saveToDatabase = async (transcriptions: string | string[]) => {
 		// Ensure transcriptions is always treated as an array
 		const accumulatedTranscriptions = Array.isArray(transcriptions)
 			? transcriptions.join(" ").trim()
@@ -372,8 +573,214 @@ const startStreaming = async (
 		} catch (error: unknown) {
 			console.error("Error saving to database:", error);
 		}
-	};
+	}; */
+	/*const saveToDatabase = async (transcriptions: { text: string; timestamp: string }[]) => {
+		if (transcriptions.length === 0) {
+			console.warn("⚠️ No transcription data to save.");
+			return;
+		}
 	
+		const formattedTranscriptions = transcriptions.map(t => `[${t.timestamp}] ${t.text}`).join(" ");
+	
+		try {
+			console.log("💾 Saving transcription data:", formattedTranscriptions);
+	
+			const response = await fetch("https://largeinfra.com/api/react-api/save_response_patients-1.php", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					username: "Brindha4",
+					transcription: formattedTranscriptions,
+					medicalReport: "Generated Report Data",
+				}),
+			});
+	
+			if (!response.ok) {
+				throw new Error(`HTTP Error: ${response.status}`);
+			}
+	
+			const data = await response.json();
+			console.log("📀 Database Save Response:", data);
+	
+			if (data.status !== "success") {
+				throw new Error(`API Error: ${data.message}`);
+			}
+		} catch (error: unknown) {
+			console.error("❌ Error saving to database:", error);
+		}
+	};*/
+	/*const saveToDatabase = async (transcriptions: { text: string; timestamp: string }[]) => {
+		if (transcriptions.length === 0) {
+			console.warn("⚠️ No transcription data to save.");
+			return;
+		}
+	
+		const accumulatedTranscriptions = transcriptions.map((t) => t.text).join(" ").trim();
+	
+		// Construct the medicalReport format
+		const formattedTranscriptions = {
+			jobName: "GQACG37LQP",
+			accountId: "891612551365",
+			status: "COMPLETED",
+			results: {
+				transcripts: [{ transcript: accumulatedTranscriptions }],
+				items: transcriptions.map((t, index) => ({
+					id: index,
+					type: "pronunciation",
+					alternatives: [{ confidence: "0.9868", content: t.text }],
+					start_time: (index * 0.5).toFixed(2),
+					end_time: ((index + 1) * 0.5).toFixed(2),
+				})),
+				audio_segments: [
+					{
+						id: 0,
+						transcript: accumulatedTranscriptions,
+						start_time: "0.0",
+						end_time: ((transcriptions.length) * 0.5).toFixed(2),
+						items: transcriptions.map((_, index) => index),
+					},
+				],
+			},
+		};
+	
+		// Convert JSON to a string before sending
+		const formattedTranscriptionsString = JSON.stringify(formattedTranscriptions);
+	
+		try {
+			console.log("💾 Saving transcription data...");
+			console.log("📝 Transcription (No timestamps):", accumulatedTranscriptions);
+			console.log("📜 Medical Report (Stringified):", formattedTranscriptionsString);
+	
+			const response = await fetch("https://largeinfra.com/api/react-api/save_response_patients-1.php", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Accept": "application/json",
+				},
+				body: JSON.stringify({
+					username: "Brindha4",
+					transcription: accumulatedTranscriptions, // Clean transcription
+					medicalReport: formattedTranscriptionsString, // Stringified JSON
+				}),
+			});
+	
+			console.log("📩 Raw API Response:", response);
+	
+			if (!response.ok) {
+				console.error(`❌ HTTP Error: ${response.status}`);
+				const errorText = await response.text();
+				console.error("❌ Error Response:", errorText);
+				return;
+			}
+	
+			// Check if response is JSON
+			const contentType = response.headers.get("content-type");
+			if (contentType && contentType.includes("application/json")) {
+				const data = await response.json();
+				console.log("📀 Database Save Response:", data);
+			} else {
+				const textData = await response.text();
+				console.warn("⚠️ Non-JSON Response Received:", textData);
+			}
+	
+		} catch (error) {
+			console.error("❌ Error saving to database:", error);
+		}
+	}; */
+	
+	 const saveToDatabase = async (transcriptions: { text: string; timestamp: string }[]) => {
+		if (transcriptions.length === 0) {
+			console.warn("⚠️ No transcription data to save.");
+			return;
+		}
+	
+		const accumulatedTranscriptions = transcriptions.map((t) => t.text).join(" ").trim();
+	
+		let startTime = 0.0;
+		const wordDuration = 0.3; // Estimated duration per word (replace with real timestamps if available)
+	
+		const words = accumulatedTranscriptions.match(/[\w']+|[.,!?;]/g) || []; // Splits words and punctuation separately
+		const items = words.map((word, index) => {
+			const isPunctuation = /[.,!?;]/.test(word);
+			const endTime = isPunctuation ? startTime : startTime + wordDuration;
+	
+			const item = {
+				id: index,
+				type: isPunctuation ? "punctuation" : "pronunciation",
+				alternatives: [{ confidence: (Math.random() * 0.5 + 0.5).toFixed(4), content: word }],
+				...(isPunctuation ? {} : { start_time: startTime.toFixed(2), end_time: endTime.toFixed(2) }),
+			};
+	
+			if (!isPunctuation) startTime = endTime; // Update start time only for words
+			return item;
+		});
+	
+		// Construct the medicalReport format
+		const formattedTranscriptions = {
+			jobName: "GQACG37LQP",
+			accountId: "891612551365",
+			status: "COMPLETED",
+			results: {
+				transcripts: [{ transcript: accumulatedTranscriptions }], // Full transcript sentence
+				items: items, // Word-wise transcription with punctuation
+				audio_segments: [
+					{
+						id: 0,
+						transcript: accumulatedTranscriptions,
+						start_time: "0.0",
+						end_time: items.length ? items[items.length - 1].end_time || "0.0" : "0.0",
+						items: items.map((_, index) => index), // Reference to items by ID
+					}
+				]
+			}
+		};
+	
+		// Convert JSON to a string before sending
+		const formattedTranscriptionsString = JSON.stringify(formattedTranscriptions);
+	
+		try {
+			console.log("💾 Saving transcription data...");
+			console.log("📝 Transcription (No timestamps):", accumulatedTranscriptions);
+			console.log("📜 Medical Report (Formatted):", formattedTranscriptionsString);
+	
+			const response = await fetch("https://largeinfra.com/api/react-api/save_response_patients-1.php", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Accept": "application/json",
+				},
+				body: JSON.stringify({
+					username: "Brindha4",
+					transcription: accumulatedTranscriptions, // Clean transcription
+					medicalReport: formattedTranscriptionsString, // Formatted JSON as a string
+				}),
+			});
+	
+			console.log("📩 Raw API Response:", response);
+	
+			if (!response.ok) {
+				console.error(`❌ HTTP Error: ${response.status}`);
+				const errorText = await response.text();
+				console.error("❌ Error Response:", errorText);
+				return;
+			}
+	
+			// Check if response is JSON
+			const contentType = response.headers.get("content-type");
+			if (contentType && contentType.includes("application/json")) {
+				const data = await response.json();
+				console.log("📀 Database Save Response:", data);
+			} else {
+				const textData = await response.text();
+				console.warn("⚠️ Non-JSON Response Received:", textData);
+			}
+	
+		} catch (error) {
+			console.error("❌ Error saving to database:", error);
+		}
+	};
 	
 	const startRecording = async () => {
 		if (!currentCredentials) return;
@@ -395,7 +802,7 @@ const startStreaming = async (
 		}
 	}, [transcribeStatus]);
 
-	useEffect(() => {
+/*	useEffect(() => {
 		console.log("Transcript updated:", transcript);
 		if (transcript) {
 			if (transcript.partial) {
@@ -407,8 +814,26 @@ const startStreaming = async (
 			console.log("Lines updated:", lines);
 			console.log("Current line updated:", currentLine);
 		}
+	}, [transcript]); */
+	useEffect(() => {
+		if (transcript) {
+			console.log("📜 Transcript State Updated:", transcript);
+			console.log("⏳ Timestamp:", transcript.timestamp);
+	
+			if (transcript.partial) {
+				console.log("🟡 Partial Transcript:", transcript.text);
+				setCurrentLine([transcript]);
+			} else {
+				console.log("🟢 Final Transcript:", transcript.text);
+				console.log("✅ Timestamp:", transcript.timestamp);
+				setLines([...lines, transcript]);
+				setCurrentLine([]);
+			}
+			console.log("📌 Current Lines:", lines);
+			console.log("📌 Current Line:", currentLine);
+		}
 	}, [transcript]);
-
+	
 	return (
 		<GlobalContext.Provider
 			value={{
