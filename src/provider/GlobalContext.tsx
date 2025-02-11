@@ -6,7 +6,11 @@ import {RecordingProperties, MessageDataType, Transcript} from "../types";
 import {transcriptionApi} from "@/aws/api";
 import {Auth} from "aws-amplify";
 import {pcmEncode} from "@/audio";
+import { fromCognitoIdentityPool } from "@aws-sdk/credential-providers";
 
+	const identityPoolId = import.meta.env.VITE_REACT_APP_IDENTITY_POOL_ID;
+//	const region = import.meta.env.VITE_REACT_APP_AWS_REGION;
+	
 const sampleRate = import.meta.env.VITE_TRANSCRIBE_SAMPLING_RATE || 16000;
 const language = import.meta.env.VITE_TRANSCRIBE_LANGUAGE_CODE as LanguageCode;
 const region = import.meta.env.VITE_REACT_APP_AWS_REGION || "us-east-1";
@@ -63,14 +67,23 @@ export const GlobalProvider = ({children}: {children: ReactNode}) => {
 	const [finalTranscriptions, setFinalTranscriptions] = useState<string[]>([]);
 	const [isApiCallInProgress, setIsApiCallInProgress] = useState<boolean>(false);
 
+	
 	useEffect(() => {
-		async function getAuth() {
-			const currCreds = await Auth.currentUserCredentials();
-			setCurrentCredentials(currCreds);
+		async function getAnonymousCredentials() {
+			try {
+				const credentials = await fromCognitoIdentityPool({
+					clientConfig: { region: region },
+					identityPoolId: identityPoolId,
+				})();
+				console.log("✅ AWS Anonymous Credentials Retrieved:", credentials);
+				setCurrentCredentials(credentials);
+			} catch (error) {
+				console.error("❌ Error retrieving AWS anonymous credentials:", error);
+			}
 		}
-
-		getAuth();
+		getAnonymousCredentials();
 	}, []);
+	
 
 	const handleTranscribe = async () => {
 		if (transcribeStatus) {
@@ -690,7 +703,7 @@ const startStreaming = async (
 		}
 	}; */
 	
-	 const saveToDatabase = async (transcriptions: { text: string; timestamp: string }[]) => {
+	/* const saveToDatabase = async (transcriptions: { text: string; timestamp: string }[]) => {
 		if (transcriptions.length === 0) {
 			console.warn("⚠️ No transcription data to save.");
 			return;
@@ -780,8 +793,146 @@ const startStreaming = async (
 		} catch (error) {
 			console.error("❌ Error saving to database:", error);
 		}
+	}; */
+	
+	const fetchPatients = async () => {
+		// Get the `doctor_email` from the URL
+		const params = new URLSearchParams(window.location.search);
+		const doctorEmail = params.get("doctor_email") || "admin@example.com"; // Use default if not provided
+	
+		try {
+			const response = await fetch(`https://largeinfra.com/react-api/listpatients_foremail.php?doctor_email=${encodeURIComponent(doctorEmail)}`);
+	
+			if (!response.ok) {
+				throw new Error(`HTTP Error: ${response.status}`);
+			}
+	
+			const data = await response.json();
+			console.log("📩 Fetched Patients:", data);
+			return data.patients || [];
+		} catch (error) {
+			console.error("❌ Error fetching patients:", error);
+			return [];
+		}
 	};
 	
+	
+	const selectPatient = async () => {
+		const patients = await fetchPatients();
+		if (patients.length === 0) {
+			console.warn("⚠️ No patients available.");
+			return null;
+		}
+	
+		// Create a dropdown selection prompt
+		const patientNames = patients.map(p => p.name);
+		const selectedName = prompt(`Select a patient: \n${patientNames.join("\n")}`, patientNames[0]);
+		
+		const selectedPatient = patients.find(p => p.name === selectedName);
+		if (!selectedPatient) {
+			console.warn("⚠️ Invalid selection. Using default patient.");
+			return patients[0]; // Default to the first patient if invalid selection
+		}
+		return selectedPatient;
+	};
+	
+	const saveToDatabase = async (transcriptions) => {
+		if (transcriptions.length === 0) {
+			console.warn("⚠️ No transcription data to save.");
+			return;
+		}
+	// Retrieve `doctor_email` from URL
+    const params = new URLSearchParams(window.location.search);
+    const doctorEmail = params.get("doctor_email") || "admin@example.com"; // Use default if not provided
+
+		const selectedPatient = await selectPatient();
+		if (!selectedPatient) {
+			console.warn("⚠️ No patient selected. Aborting save.");
+			return;
+		}
+	
+		const accumulatedTranscriptions = transcriptions.map((t) => t.text).join(" ").trim();
+		let startTime = 0.0;
+		const wordDuration = 0.3;
+	
+		const words = accumulatedTranscriptions.match(/[\w']+|[.,!?;]/g) || [];
+		const items = words.map((word, index) => {
+			const isPunctuation = /[.,!?;]/.test(word);
+			const endTime = isPunctuation ? startTime : startTime + wordDuration;
+	
+			const item = {
+				id: index,
+				type: isPunctuation ? "punctuation" : "pronunciation",
+				alternatives: [{ confidence: (Math.random() * 0.5 + 0.5).toFixed(4), content: word }],
+				...(isPunctuation ? {} : { start_time: startTime.toFixed(2), end_time: endTime.toFixed(2) }),
+			};
+	
+			if (!isPunctuation) startTime = endTime;
+			return item;
+		});
+	
+		const formattedTranscriptions = {
+			jobName: "GQACG37LQP",
+			accountId: "891612551365",
+			status: "COMPLETED",
+			results: {
+				transcripts: [{ transcript: accumulatedTranscriptions }],
+				items: items,
+				audio_segments: [
+					{
+						id: 0,
+						transcript: accumulatedTranscriptions,
+						start_time: "0.0",
+						end_time: items.length ? items[items.length - 1].end_time || "0.0" : "0.0",
+						items: items.map((_, index) => index),
+					}
+				]
+			}
+		};
+	
+		try {
+			console.log("💾 Saving transcription data...");
+			console.log("📝 Transcription (No timestamps):", accumulatedTranscriptions);
+			console.log("📜 Medical Report (Formatted):", JSON.stringify(formattedTranscriptions));
+	
+			const response = await fetch("https://largeinfra.com/api/react-api/save_response_patients-3.php", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Accept": "application/json",
+				},
+				body: JSON.stringify({
+					doctor_email: doctorEmail,
+					username: selectedPatient.name, // Use dynamically selected patient name
+					transcription: accumulatedTranscriptions,
+					medicalReport: JSON.stringify(formattedTranscriptions),
+				}),
+			});
+	
+			console.log("📩 Raw API Response:", response);
+	
+			if (!response.ok) {
+				console.error(`❌ HTTP Error: ${response.status}`);
+				const errorText = await response.text();
+				console.error("❌ Error Response:", errorText);
+				return;
+			}
+	
+			const contentType = response.headers.get("content-type");
+			if (contentType && contentType.includes("application/json")) {
+				const data = await response.json();
+				console.log("📀 Database Save Response:", data);
+			} else {
+				const textData = await response.text();
+				console.warn("⚠️ Non-JSON Response Received:", textData);
+			}
+	
+		} catch (error) {
+			console.error("❌ Error saving to database:", error);
+		}
+	};
+	
+
 	const startRecording = async () => {
 		if (!currentCredentials) return;
 
